@@ -1,0 +1,18 @@
+# Confidential / not for the repo
+7902 Assessment.pdf
+
+# IDE
+.idea/
+*.iml
+
+# Build output
+target/
+build/
+out/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
