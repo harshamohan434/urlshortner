@@ -17,6 +17,12 @@ import java.time.Instant;
  * Custom-alias links skip that phase and get their code set in a single insert. Multiple
  * transient nulls are safe here since unique constraints treat NULLs as distinct in both H2
  * and Postgres, and the null window never survives past the create transaction.
+ *
+ * <p>{@code managementToken} + {@code deactivatedAt}: this system has no auth, so "the person
+ * who created the link" can't be verified by identity. The management token (a random secret
+ * returned only once, in the create response) is the ownership proof instead — see
+ * docs/ai-log.md for the ambiguous-requirement resolution this implements. Deactivation is
+ * soft (row + analytics history kept), matching how expiry already works.
  */
 @Entity
 @Table(name = "short_link", indexes = @Index(name = "idx_short_link_code", columnList = "code", unique = true))
@@ -45,20 +51,37 @@ public class ShortLink {
 
     private Instant lastAccessedAt;
 
+    @Column(nullable = false, length = 64)
+    private String managementToken;
+
+    private Instant deactivatedAt;
+
     protected ShortLink() {
         // JPA
     }
 
-    public ShortLink(String longUrl, String code, boolean customAlias, Instant createdAt, Instant expiresAt) {
+    public ShortLink(String longUrl, String code, boolean customAlias, Instant createdAt, Instant expiresAt,
+                      String managementToken) {
         this.longUrl = longUrl;
         this.code = code;
         this.customAlias = customAlias;
         this.createdAt = createdAt;
         this.expiresAt = expiresAt;
+        this.managementToken = managementToken;
     }
 
     public boolean isExpired(Instant now) {
         return expiresAt != null && expiresAt.isBefore(now);
+    }
+
+    public boolean isDeactivated() {
+        return deactivatedAt != null;
+    }
+
+    public void deactivate(Instant at) {
+        if (this.deactivatedAt == null) {
+            this.deactivatedAt = at;
+        }
     }
 
     public Long getId() {
@@ -95,5 +118,13 @@ public class ShortLink {
 
     public Instant getLastAccessedAt() {
         return lastAccessedAt;
+    }
+
+    public String getManagementToken() {
+        return managementToken;
+    }
+
+    public Instant getDeactivatedAt() {
+        return deactivatedAt;
     }
 }

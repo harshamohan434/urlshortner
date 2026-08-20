@@ -64,8 +64,11 @@ export DB_PASSWORD="yourpassword"
 curl -X POST http://localhost:8080/api/v1/links \
   -H "Content-Type: application/json" \
   -d '{"longUrl":"https://www.example.com/some/long/path"}'
-# -> 201 {"code":"0000001","shortUrl":"http://localhost:8080/0000001","longUrl":"...","expiresAt":null,"createdAt":"..."}
+# -> 201 {"code":"0000001","shortUrl":"http://localhost:8080/0000001","longUrl":"...",
+#         "expiresAt":null,"createdAt":"...","managementToken":"c4657abf-..."}
 ```
+Save the `managementToken` — it's shown **only here, once**. It's the only proof of ownership
+this no-auth service has, and it's required to delete the link later (see below).
 
 With a custom alias and an expiry:
 ```bash
@@ -86,6 +89,19 @@ curl http://localhost:8080/api/v1/links/0000001/stats
 #     "recentReferrers":["direct"],"deviceBreakdown":{"desktop":2}}
 ```
 
+**Daily click rollup** (last N days, default 7, range 1-90 — for charting trends):
+```bash
+curl "http://localhost:8080/api/v1/links/0000001/stats/daily?days=3"
+# -> {"code":"0000001","days":[{"date":"2026-08-18","count":0},{"date":"2026-08-19","count":2},{"date":"2026-08-20","count":0}]}
+```
+
+**Take a link back down** (requires the `managementToken` from creation):
+```bash
+curl -X DELETE http://localhost:8080/api/v1/links/0000001 -H "X-Management-Token: c4657abf-..."
+# -> 204. The link is deactivated (not deleted — history/analytics are kept) and the redirect
+#    immediately starts returning 410 link_deactivated, not a stale cached 302.
+```
+
 ### Error responses
 
 Every error follows one envelope: `{"error": "<slug>", "message": "...", "details": {...}}`
@@ -93,10 +109,11 @@ Every error follows one envelope: `{"error": "<slug>", "message": "...", "detail
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `invalid_request` | Malformed body, invalid URL scheme, invalid custom alias |
+| 400 | `invalid_request` | Malformed body, invalid URL scheme, invalid custom alias, `days` out of 1-90 range |
+| 403 | `access_denied` | Missing or incorrect `X-Management-Token` on delete |
 | 404 | `not_found` | Unknown short code |
 | 409 | `alias_conflict` | Custom alias already taken |
-| 410 | `link_expired` | Link's `expiresAt` has passed |
+| 410 | `link_expired` / `link_deactivated` | Link's `expiresAt` has passed / owner took it down |
 | 429 | `rate_limit_exceeded` | Too many `POST /api/v1/links` calls from one client (see `Retry-After` header) |
 | 500 | `internal_error` / `code_generation_conflict` | Unexpected server error / rare code-namespace collision (see `docs/ai-log.md`) |
 

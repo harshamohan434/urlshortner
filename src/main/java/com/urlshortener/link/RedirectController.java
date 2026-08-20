@@ -1,6 +1,7 @@
 package com.urlshortener.link;
 
 import com.urlshortener.analytics.AnalyticsService;
+import com.urlshortener.common.exception.LinkDeactivatedException;
 import com.urlshortener.common.exception.LinkExpiredException;
 import com.urlshortener.common.exception.LinkNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -30,6 +31,9 @@ public class RedirectController {
 
         if (link.isExpired(Instant.now())) {
             throw new LinkExpiredException(code);
+        }
+        if (link.isDeactivated()) {
+            throw new LinkDeactivatedException(code);
         }
 
         // Fire-and-forget: the redirect response does not wait on this.

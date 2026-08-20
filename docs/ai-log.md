@@ -96,3 +96,83 @@ naturally gives without extra plumbing.
   `curl`): create, redirect (302 + correct `Location`), async analytics (click count updated
   correctly), 404, custom alias, 409 conflict, and 400 invalid-scheme rejection all verified
   against real HTTP responses, not just MockMvc.
+
+---
+
+## Entry 3 — Brownfield: daily analytics rollup
+
+**Task:** Add `GET /api/v1/links/{code}/stats/daily?days=N` — click counts bucketed by day —
+on top of the already-live v1 service. Routed through a codebase-reasoner-style impact
+analysis first (brownfield discipline: trace the change surface before touching working code),
+which is where the two real decisions below came from.
+
+**Impact analysis findings acted on (not skipped):**
+1. **Missing index risk**: `ClickEvent` only had an index on `code`; a "last N days" query
+   filters on `code` + `occurredAt` both. Added a composite `(code, occurredAt)` index
+   *additively* (kept the existing single-column index) rather than replacing it, to keep this
+   a purely additive brownfield change per the analysis's own "minimal invasive" recommendation.
+2. **Dialect portability**: this project runs both H2 (dev) and Postgres (prod) with no
+   existing precedent for a native date-trunc query. Chose to fetch raw timestamps and bucket
+   by `LocalDate` in Java (same pattern `getStats` already uses for `recentReferrers`) instead
+   of a SQL-side `GROUP BY date_trunc(...)`, to avoid a query that behaves differently per
+   dialect.
+
+**Generated:** `ClickEventRepository.findOccurredAtByCodeSince`, `AnalyticsService
+.getDailyStats`, `DailyStatsResponse` DTO, `AnalyticsController` `/stats/daily` handler,
+`InvalidRequestException` (+ handler) for `days` param range validation (1-90).
+
+**Edited:** Also adopted the impact analysis's suggestion to constructor-inject `Clock` into
+`AnalyticsService` (it was calling `Instant.now()` directly) — makes day-boundary bucketing
+logic deterministic and testable with a fixed clock, and brings it in line with the
+`RateLimiterService`/`ClockConfig` pattern already established.
+
+**Validated:** Unit tests (`AnalyticsServiceTest`, fixed `Clock`) covering day-boundary
+bucketing and zero-fill for click-free days; integration tests (`AnalyticsControllerIntegrationTest`)
+for 404/400/200 shapes. 27/27 tests green. No dedicated analytics test class existed before
+this change — the impact analysis flagged that gap explicitly, so these tests are a
+prerequisite of the change, not optional extra coverage.
+
+**Sign-off:** Impact analysis rated this low/medium impact — no schema-breaking change, no
+hot-path touch, no auth, purely additive endpoint — so no mandatory human sign-off was
+required per project policy, and none was sought.
+
+---
+
+## Entry 4 — Ambiguous requirement: "let people take their link back down"
+
+**Task as given (deliberately underspecified):** "Let people take their short link back down
+if they change their mind."
+
+**Requirement interpretation (the actual work here, not the code):**
+
+| Ambiguity | Rejected option | Chosen resolution | Why |
+|---|---|---|---|
+| Who can delete a link? | Anyone who knows the short code | A one-time management token, returned only in the create response, required via `X-Management-Token` header to delete | Knowing the code is public by design (it's the whole point of the link) — that's not proof of ownership. Full auth is real infrastructure this system doesn't have and the ask doesn't justify building it today. |
+| Delete vs. deactivate | Hard-delete the row | Soft: set `deactivatedAt`, keep the row + analytics history | Matches how expiry already works — one "gone" semantic, not two different code paths for "TTL passed" vs "actually removed." |
+| Token exposure | Return it on every future read | Shown once, at creation, never again | `LinkResponse` (the only place the token appears) is only ever returned by the create endpoint — no separate "leak prevention" logic needed, the existing API shape already enforces it. |
+
+**Generated:** `ShortLink.managementToken`/`deactivatedAt`/`isDeactivated()`/`deactivate()`,
+`LinkService.deactivate` (token check via `MessageDigest.isEqual` — constant-time comparison,
+not `String.equals`, to avoid a timing side-channel on the token check), `DELETE
+/api/v1/links/{code}`, `LinkDeactivatedException` (410, distinct `error` slug from
+`link_expired` so a client can tell the two apart), `LinkAccessDeniedException` (403).
+
+**Caught during implementation, not just "generated and shipped":** the redirect hot path
+uses a Caffeine cache-aside lookup (`LinkService.resolve`) with no existing invalidation
+trigger — deactivating a link without evicting its cache entry would have kept it redirecting
+for up to the cache's TTL, directly defeating the feature ("take it down" would silently not
+take it down for several minutes). Fixed by having `LinkService.deactivate` call
+`cache.invalidate(code)` unconditionally. Verified with a real, non-mocked check: manual
+`curl` smoke test hit the redirect endpoint *immediately* after a successful delete and got
+`410 link_deactivated` on the very next request, not a stale `302`.
+
+**Rejected:** Considered making delete idempotent-with-error (404 on a second delete of an
+already-deactivated link with the same valid token). Rejected in favor of idempotent-success
+(repeated `204`) — standard DELETE semantics, and there's no reason a repeat request with a
+still-valid token should be treated as a client error.
+
+**Validated:** `LinkDeactivationIntegrationTest` — correct-token success, wrong-token 403,
+missing-token 403, unknown-code 404, idempotent repeat-delete — plus a manual `curl` run
+against the live service (on a separate port, to avoid touching another already-running
+instance) confirming the full flow including the immediate-cache-eviction behavior above.
+32/32 tests green.

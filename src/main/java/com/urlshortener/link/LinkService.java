@@ -4,15 +4,21 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.urlshortener.common.exception.AliasConflictException;
 import com.urlshortener.common.exception.CodeGenerationConflictException;
 import com.urlshortener.common.exception.InvalidUrlException;
+import com.urlshortener.common.exception.LinkAccessDeniedException;
+import com.urlshortener.common.exception.LinkNotFoundException;
 import com.urlshortener.config.UrlShortenerProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class LinkService {
@@ -23,17 +29,21 @@ public class LinkService {
     private final ShortLinkRepository repository;
     private final UrlShortenerProperties properties;
     private final Cache<String, ShortLink> cache;
+    private final Clock clock;
 
-    public LinkService(ShortLinkRepository repository, UrlShortenerProperties properties, Cache<String, ShortLink> cache) {
+    public LinkService(ShortLinkRepository repository, UrlShortenerProperties properties,
+                        Cache<String, ShortLink> cache, Clock clock) {
         this.repository = repository;
         this.properties = properties;
         this.cache = cache;
+        this.clock = clock;
     }
 
     @Transactional
     public LinkResponse createLink(CreateLinkRequest request) {
         validateLongUrl(request.longUrl());
-        Instant now = Instant.now();
+        Instant now = clock.instant();
+        String managementToken = UUID.randomUUID().toString();
 
         ShortLink link;
         if (request.customAlias() != null && !request.customAlias().isBlank()) {
@@ -44,12 +54,12 @@ public class LinkService {
             if (repository.existsByCode(alias)) {
                 throw new AliasConflictException(alias);
             }
-            link = new ShortLink(request.longUrl(), alias, true, now, request.expiresAt());
+            link = new ShortLink(request.longUrl(), alias, true, now, request.expiresAt(), managementToken);
             repository.save(link);
         } else {
             // Two-phase insert: persist without a code to obtain the auto-increment id,
             // then derive the Base62 code from that id and update the row.
-            link = new ShortLink(request.longUrl(), null, false, now, request.expiresAt());
+            link = new ShortLink(request.longUrl(), null, false, now, request.expiresAt(), managementToken);
             repository.save(link);
             String generatedCode = Base62Encoder.encode(link.getId(), properties.codeLength());
             if (repository.existsByCode(generatedCode)) {
@@ -79,6 +89,34 @@ public class LinkService {
         return found;
     }
 
+    /**
+     * Deactivates a link on behalf of whoever holds its management token — the only proof of
+     * "ownership" this no-auth system has (see ShortLink javadoc). Idempotent: deactivating an
+     * already-deactivated link succeeds silently rather than erroring, per normal DELETE
+     * semantics. Always evicts the cache entry, even if it wasn't already deactivated — the
+     * redirect cache-aside path (see resolve()) has no other invalidation trigger, so without
+     * this a "deleted" link would keep redirecting for up to the cache's TTL.
+     */
+    @Transactional
+    public void deactivate(String code, String providedToken) {
+        ShortLink link = repository.findByCode(code)
+                .orElseThrow(() -> new LinkNotFoundException(code));
+
+        if (providedToken == null || !constantTimeEquals(link.getManagementToken(), providedToken)) {
+            throw new LinkAccessDeniedException();
+        }
+
+        link.deactivate(clock.instant());
+        repository.save(link);
+        cache.invalidate(code);
+    }
+
+    private boolean constantTimeEquals(String expected, String actual) {
+        return MessageDigest.isEqual(
+                expected.getBytes(StandardCharsets.UTF_8),
+                actual.getBytes(StandardCharsets.UTF_8));
+    }
+
     private void validateLongUrl(String longUrl) {
         try {
             URI uri = new URI(longUrl);
@@ -93,6 +131,7 @@ public class LinkService {
 
     private LinkResponse toResponse(ShortLink link) {
         String shortUrl = properties.baseUrl() + "/" + link.getCode();
-        return new LinkResponse(link.getCode(), shortUrl, link.getLongUrl(), link.getExpiresAt(), link.getCreatedAt());
+        return new LinkResponse(link.getCode(), shortUrl, link.getLongUrl(), link.getExpiresAt(),
+                link.getCreatedAt(), link.getManagementToken());
     }
 }

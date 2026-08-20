@@ -4,6 +4,8 @@ import com.urlshortener.common.exception.AliasConflictException;
 import com.urlshortener.common.exception.CodeGenerationConflictException;
 import com.urlshortener.common.exception.InvalidRequestException;
 import com.urlshortener.common.exception.InvalidUrlException;
+import com.urlshortener.common.exception.LinkAccessDeniedException;
+import com.urlshortener.common.exception.LinkDeactivatedException;
 import com.urlshortener.common.exception.LinkExpiredException;
 import com.urlshortener.common.exception.LinkNotFoundException;
 import com.urlshortener.common.exception.RateLimitExceededException;
@@ -45,6 +47,18 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleExpired(LinkExpiredException ex) {
         return ResponseEntity.status(HttpStatus.GONE)
                 .body(ErrorResponse.of("link_expired", ex.getMessage(), Map.of("code", ex.getCode())));
+    }
+
+    @ExceptionHandler(LinkDeactivatedException.class)
+    public ResponseEntity<ErrorResponse> handleDeactivated(LinkDeactivatedException ex) {
+        return ResponseEntity.status(HttpStatus.GONE)
+                .body(ErrorResponse.of("link_deactivated", ex.getMessage(), Map.of("code", ex.getCode())));
+    }
+
+    @ExceptionHandler(LinkAccessDeniedException.class)
+    public ResponseEntity<ErrorResponse> handleAccessDenied(LinkAccessDeniedException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(ErrorResponse.of("access_denied", ex.getMessage()));
     }
 
     @ExceptionHandler(RateLimitExceededException.class)
