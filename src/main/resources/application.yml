@@ -1,0 +1,64 @@
+spring:
+  application:
+    name: urlshortener
+
+  # Default profile: H2 in-memory, zero setup. Run with `--spring.profiles.active=prod`
+  # (or SPRING_PROFILES_ACTIVE=prod) for Postgres.
+  datasource:
+    url: jdbc:h2:mem:urlshortener;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: false
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+urlshortener:
+  # Base URL used to build the full short link returned to clients, e.g. http://localhost:8080/abc123
+  base-url: http://localhost:8080
+  # Length of generated short codes (Base62)
+  code-length: 7
+  rate-limit:
+    # Token-bucket limits on the create-link (write) endpoint, per client IP
+    capacity: 20
+    refill-per-minute: 20
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/urlshortener}
+    driver-class-name: org.postgresql.Driver
+    username: ${DB_USERNAME:urlshortener}
+    password: ${DB_PASSWORD:}
+  jpa:
+    hibernate:
+      # NOTE: no Flyway/versioned migrations in this prototype (documented trade-off in
+      # docs/testing-and-tradeoffs.md) — `update` is used here too rather than `validate`,
+      # which would require migrations to already exist. Revisit before real production use.
+      ddl-auto: update
+  h2:
+    console:
+      enabled: false
